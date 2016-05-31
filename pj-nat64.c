@@ -1,6 +1,12 @@
 #include <pjsua.h>
+#include <pjsua-lib/pjsua_internal.h>
+#include "pj-nat64.h"
 
 #define THIS_FILE "pj_nat64.c"
+
+static nat64_options module_options;
+
+static pjsua_acc_id active_add_id = PJSUA_INVALID_ID;
 
 /* Syntax error handler for parser. */
 static void on_syntax_error(pj_scanner *scanner)
@@ -49,6 +55,29 @@ static int calculate_new_content_length(char* buffer)
         PJ_LOG(1, (THIS_FILE,
                    "Error: Could not find Content-Length header. The correct length can not be set. This must never happen."));
         return -1;
+    }
+}
+
+//Helper that will resolve or synthesize to ipv6. Output buffer will be null terminated
+static void resolve_or_synthesize_ipv4_to_ipv6(pj_str_t* host_or_ip, char* buf, int buf_len)
+{
+    unsigned int count = 1;
+    pj_addrinfo ai[1];
+    pj_getaddrinfo(PJ_AF_UNSPEC, host_or_ip, &count, ai);
+
+    if (count > 0) {
+        if (ai[0].ai_addr.addr.sa_family == PJ_AF_INET) {
+            pj_inet_ntop(PJ_AF_INET, &ai[0].ai_addr.ipv4.sin_addr, buf, PJ_INET_ADDRSTRLEN);
+        } else if (ai[0].ai_addr.addr.sa_family == PJ_AF_INET6) {
+            pj_inet_ntop(PJ_AF_INET6, &ai[0].ai_addr.ipv6.sin6_addr, buf,
+                         PJ_INET6_ADDRSTRLEN);
+        } else {
+            PJ_LOG(1, (THIS_FILE, "Error: Unknown AF %d use original input", ai[0].ai_addr.addr.sa_family));
+            pj_ansi_snprintf(buf, buf_len, "%.*s", (int)host_or_ip->slen, host_or_ip->ptr);
+        }
+    } else {
+        PJ_LOG(1, (THIS_FILE, "Error: Synthesizing media ip failed, ai count = 0. Use original input"));
+        pj_ansi_snprintf(buf, buf_len, "%.*s", (int)host_or_ip->slen, host_or_ip->ptr);
     }
 }
 
@@ -104,7 +133,7 @@ static int update_content_length(char* buffer, pjsip_msg* msg)
 }
 
 //For outgoing INVITE and 200 OK
-static void replace_ipv6_with_ipv4(pjsip_tx_data *tdata)
+static void replace_sdp_ipv6_with_ipv4(pjsip_tx_data *tdata)
 {
     PJ_USE_EXCEPTION;
     pj_scanner scanner;
@@ -141,10 +170,18 @@ static void replace_ipv6_with_ipv4(pjsip_tx_data *tdata)
             pj_scan_get_until_ch( &scanner, '\r', &result);
             PJ_LOG(4, (THIS_FILE, "Extracted ip6 address as %.*s", result.slen, result.ptr));
 
-            //Replace with unroutable address so latching takes place, TODO sdp_rewrite consideration using via address instead
-            pj_memcpy(walker_p, unroutable_host.ptr, unroutable_host.slen);
-            walker_p = walker_p + unroutable_host.slen;
-
+            if (active_add_id != PJSUA_INVALID_ID && pjsua_var.acc[active_add_id].cfg.allow_sdp_nat_rewrite && pjsua_var.acc[active_add_id].reg_mapped_addr.slen)
+            {
+                PJ_LOG(4, (THIS_FILE, "Replace local ipv6 address with address from Via header (%.*s)",
+                pjsua_var.acc[active_add_id].reg_mapped_addr.slen, pjsua_var.acc[active_add_id].reg_mapped_addr.ptr));
+                pj_memcpy(walker_p, pjsua_var.acc[active_add_id].reg_mapped_addr.ptr,
+                pjsua_var.acc[active_add_id].reg_mapped_addr.slen);
+                walker_p = walker_p + pjsua_var.acc[active_add_id].reg_mapped_addr.slen;
+            } else {
+                //Replace with unroutable address so latching is used,
+                pj_memcpy(walker_p, unroutable_host.ptr, unroutable_host.slen);
+                walker_p = walker_p + unroutable_host.slen;
+            }
             //In case this is the last occurance in the message, lets append the rest but do not advance walker_p in case there is more
             //The scanner string is always null terminated so include the terminating character as well
             pj_memcpy(walker_p, scanner.curptr, (scanner.end - scanner.curptr) +1);
@@ -174,7 +211,7 @@ static void replace_ipv6_with_ipv4(pjsip_tx_data *tdata)
 
 
 //For incoming INVITE and 200 OK
-static void replace_ipv4_with_ipv6(pjsip_rx_data *rdata)
+static void replace_sdp_ipv4_with_ipv6(pjsip_rx_data *rdata)
 {
     PJ_USE_EXCEPTION;
     pj_scanner scanner;
@@ -185,8 +222,6 @@ static void replace_ipv4_with_ipv6(pjsip_rx_data *rdata)
     pj_str_t ipv6_str = pj_str("IP6");
 
     pj_bzero(new_buffer, PJSIP_MAX_PKT_LEN);
-
-    //org_buffer = "INVITE ASSAAS IP4 91.12.12.12\r\nsdjkfskjflk IP4 99.12.12.23\r\n";  //for testing
 
     PJ_LOG(4, (THIS_FILE, "**********Incoming INVITE or 200 with IPv4 address*************"));
     PJ_LOG(4, (THIS_FILE, "%s", org_buffer));
@@ -215,25 +250,7 @@ static void replace_ipv4_with_ipv6(pjsip_rx_data *rdata)
             pj_scan_get_until_ch( &scanner, '\r', &result);
             PJ_LOG(4, (THIS_FILE, "Extracted ip4 address as %.*s", result.slen, result.ptr));
 
-            //Resolve or synthesize to ipv6
-            {
-                unsigned int count = 1;
-                pj_addrinfo ai[1];
-                pj_getaddrinfo(PJ_AF_UNSPEC, &result, &count, ai);
-
-                if (count > 0)
-                {
-                    if (ai[0].ai_addr.addr.sa_family == PJ_AF_INET) {
-                        pj_inet_ntop(PJ_AF_INET, &ai[0].ai_addr.ipv4.sin_addr, walker_p, PJ_INET_ADDRSTRLEN);
-                    } else if (ai[0].ai_addr.addr.sa_family == PJ_AF_INET6) {
-                        pj_inet_ntop(PJ_AF_INET6, &ai[0].ai_addr.ipv6.sin6_addr, walker_p,
-                                     PJ_INET6_ADDRSTRLEN);
-                    }
-                } else {
-                    PJ_LOG(1, (THIS_FILE, "Error: Synthesizing media ip failed, ai count = 0"));
-                    return;
-                }
-            }
+            resolve_or_synthesize_ipv4_to_ipv6(&result, walker_p, (PJSIP_MAX_PKT_LEN - (int)strlen(walker_p)));
 
             //walker_p is now null terminated, reset it to point at the end of the current buffer (without null termination)
             walker_p = walker_p + strlen(walker_p);
@@ -267,32 +284,70 @@ static void replace_ipv4_with_ipv6(pjsip_rx_data *rdata)
     return;
 }
 
+static void replace_route_and_contact_ipv4_with_ipv6(pjsip_rx_data *rdata)
+{
+    char ipv6_buf[PJ_INET6_ADDRSTRLEN] = {0} ;
+    pjsip_route_hdr* current_route_hdr = NULL;
+
+    pjsip_contact_hdr *current_contact_hdr = (pjsip_contact_hdr*)pjsip_msg_find_hdr( rdata->msg_info.msg, PJSIP_H_CONTACT,
+            NULL);
+    if (current_contact_hdr != NULL) {
+        pjsip_sip_uri * sip_uri = NULL;
+        sip_uri = (pjsip_sip_uri *)pjsip_uri_get_uri(current_contact_hdr->uri);
+        PJ_LOG(4, (THIS_FILE, "Host in Contact header is %.*s",sip_uri->host.slen, sip_uri->host.ptr));
+
+        resolve_or_synthesize_ipv4_to_ipv6(&sip_uri->host, ipv6_buf, PJ_INET6_ADDRSTRLEN);
+        pj_strdup2(rdata->tp_info.pool, &sip_uri->host, ipv6_buf);
+    }
+
+    //This part is not tested since our messages does not contain Route headers.
+    //According to pjsip Route header has prio over the Contact header.
+    current_route_hdr = (pjsip_route_hdr*)pjsip_msg_find_hdr( rdata->msg_info.msg, PJSIP_H_ROUTE, NULL);
+    if (current_route_hdr != NULL) {
+        pjsip_sip_uri * sip_uri = NULL;
+        sip_uri = (pjsip_sip_uri *)pjsip_uri_get_uri(current_route_hdr->name_addr.uri);
+        PJ_LOG(4, (THIS_FILE, "Host in Route header is %.*s",sip_uri->host.slen, sip_uri->host.ptr));
+        resolve_or_synthesize_ipv4_to_ipv6(&sip_uri->host, ipv6_buf, PJ_INET6_ADDRSTRLEN);
+        pj_strdup2(rdata->tp_info.pool, &sip_uri->host, ipv6_buf);
+    }
+}
+
+
 static pj_status_t ipv6_mod_on_rx(pjsip_rx_data *rdata)
 {
+
     pjsip_cseq_hdr *cseq = rdata->msg_info.cseq;
     PJ_LOG(4, (THIS_FILE, "ipv6_mod_on_rx"));
 
     if (cseq != NULL && cseq->method.id == PJSIP_INVITE_METHOD) {
         PJ_LOG(4, (THIS_FILE, "Incoming INVITE or 200 OK. If they contain IPv4 addresses, we need to change to ipv6"));
-        replace_ipv4_with_ipv6(rdata);
+        if (module_options & NAT64_REWRITE_INCOMING_SDP) {
+            replace_sdp_ipv4_with_ipv6(rdata);
+        }
+        if (module_options &  NAT64_REWRITE_ROUTE_AND_CONTACT) {
+            replace_route_and_contact_ipv4_with_ipv6(rdata);
+        }
     }
+
     return PJ_FALSE;
 }
 
 pj_status_t ipv6_mod_on_tx(pjsip_tx_data *tdata)
 {
-    pjsip_cseq_hdr *cseq = (pjsip_cseq_hdr*)pjsip_msg_find_hdr( tdata->msg, PJSIP_H_CSEQ, NULL);
-    PJ_TODO(CHECK_OUTGOING_BUFFER_SIZE_HANDLING);
-    PJ_LOG(4, (THIS_FILE, "ipv6_mod_on_tx"));
+    if (module_options & NAT64_REWRITE_OUTGOING_SDP) {
+        pjsip_cseq_hdr *cseq = (pjsip_cseq_hdr*)pjsip_msg_find_hdr( tdata->msg, PJSIP_H_CSEQ, NULL);
+        PJ_TODO(CHECK_OUTGOING_BUFFER_SIZE_HANDLING);
+        PJ_LOG(4, (THIS_FILE, "ipv6_mod_on_tx"));
 
-    if (cseq != NULL && cseq->method.id == PJSIP_INVITE_METHOD) {
-        PJ_LOG(4, (THIS_FILE, "Outgoing INVITE or 200 OK. If it contains IPv6 addresses, we need to change to ipv4"));
-        replace_ipv6_with_ipv4(tdata);
+        if (cseq != NULL && cseq->method.id == PJSIP_INVITE_METHOD) {
+            PJ_LOG(4, (THIS_FILE, "Outgoing INVITE or 200 OK. If it contains IPv6 addresses, we need to change to ipv4"));
+            replace_sdp_ipv6_with_ipv4(tdata);
+        }
     }
     return PJ_SUCCESS;
 }
 
-/* The ka module instance, used for tracking outgoing req and incoming responses.*/
+/* L1 rewrite module for sdp info.*/
 static pjsip_module ipv6_module = {
     NULL, NULL,                     /* prev, next.      */
     { "mod-ipv6", 8},                 /* Name.        */
@@ -309,8 +364,9 @@ static pjsip_module ipv6_module = {
     NULL,                           /* on_tsx_state()   */
 };
 
-pj_status_t pj_nat64_enable_rewrite_module()
+pj_status_t pj_nat64_enable_rewrite_module(nat64_options options)
 {
+    module_options = options;
     return pjsip_endpt_register_module(pjsua_get_pjsip_endpt(), &ipv6_module);
 }
 
@@ -335,8 +391,31 @@ static void replace_hostname_with_ip(char* proxy_hostname)
             proxy_hostname[0] = '[';
             pj_inet_ntop(PJ_AF_INET6, &ai[0].ai_addr.ipv6.sin6_addr, proxy_hostname+1, PJ_MAX_HOSTNAME);
             strcat(proxy_hostname, "]");
+
         }
     }
+}
+
+pj_status_t pj_nat64_get_hostname_from_proxy_string(char* proxy, char* hostname_buf)
+{
+    pj_bool_t proxy_is_static_ip_v6_address = strchr(proxy, ']') != NULL ? PJ_TRUE : PJ_FALSE;
+    char* addr_start = strchr(proxy, ':');
+    char* addr_end = NULL;
+
+    if (addr_start != NULL) {
+        addr_start++;
+        if (proxy_is_static_ip_v6_address) {
+            addr_end = strstr(proxy, "]:");
+        } else {
+            addr_end = strstr(addr_start, ":");
+        }
+        if (addr_end != NULL) {
+            strncpy(hostname_buf, addr_start, addr_end-addr_start);
+            hostname_buf[addr_end - addr_start] = '\0';
+            return PJ_SUCCESS;
+        }
+    }
+    return PJ_EIGNORED;
 }
 
 pj_status_t pj_nat64_resolve_and_replace_hostname_with_ip_if_possible(char* proxy, char* resolved_proxy_buf)
@@ -359,6 +438,7 @@ pj_status_t pj_nat64_resolve_and_replace_hostname_with_ip_if_possible(char* prox
                                        proxy);
             strncpy(hostname_buf, addr_start, addr_end-addr_start);
             hostname_buf[addr_end - addr_start] = '\0';
+
             replace_hostname_with_ip(hostname_buf);
             pj_ansi_snprintf(resolved_proxy_buf, PJ_MAX_HOSTNAME, "%.*s%s%.*s",  (int)len_sip_sips,
                              proxy, hostname_buf, (int)len_port_and_tail, addr_end);
@@ -366,4 +446,9 @@ pj_status_t pj_nat64_resolve_and_replace_hostname_with_ip_if_possible(char* prox
         }
     }
     return PJ_EIGNORED;
+}
+
+void pj_nat64_set_active_account(pjsua_acc_id acc_id)
+{
+    active_add_id = acc_id;
 }
