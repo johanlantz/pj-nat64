@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name = "pj-nat64"
-  s.version = "0.1.0"
+  s.version = "0.2.0"
   s.summary = "NAT64 workarounds for pjsip"
   s.homepage = "https://github.com/johanlantz/curly"
   s.license = { :type => "MIT", :file => "LICENSE" }
