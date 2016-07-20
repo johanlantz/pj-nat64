@@ -376,6 +376,29 @@ pj_status_t pj_nat64_disable_rewrite_module()
                                           &ipv6_module);
 }
 
+char* find_addr_start(char *proxy)
+{
+    char *addr_start = NULL;
+    //ignore the user if it's there
+    addr_start = strchr(proxy, '@');
+    //otherwise, go past sip[s]:
+    if (addr_start == NULL)
+        addr_start = strchr(proxy, ':');
+    return addr_start;
+}
+
+char* find_addr_end(pj_bool_t proxy_is_static_ip_v6_address, char *addr_start)
+{
+    char *addr_end = NULL;
+    if (proxy_is_static_ip_v6_address) {
+        addr_end = strstr(addr_start, "]:");
+    } else {
+        addr_end = strstr(addr_start, ":");
+        if (addr_end == NULL)
+            addr_end = strstr(addr_start, ";");
+    }
+    return addr_end;
+}
 
 static void replace_hostname_with_ip(char* proxy_hostname)
 {
@@ -399,16 +422,12 @@ static void replace_hostname_with_ip(char* proxy_hostname)
 pj_status_t pj_nat64_get_hostname_from_proxy_string(char* proxy, char* hostname_buf)
 {
     pj_bool_t proxy_is_static_ip_v6_address = strchr(proxy, ']') != NULL ? PJ_TRUE : PJ_FALSE;
-    char* addr_start = strchr(proxy, ':');
+    char* addr_start = find_addr_start(proxy);
     char* addr_end = NULL;
 
     if (addr_start != NULL) {
         addr_start++;
-        if (proxy_is_static_ip_v6_address) {
-            addr_end = strstr(proxy, "]:");
-        } else {
-            addr_end = strstr(addr_start, ":");
-        }
+        addr_end = find_addr_end(proxy_is_static_ip_v6_address, addr_start);
         if (addr_end != NULL) {
             strncpy(hostname_buf, addr_start, addr_end-addr_start);
             hostname_buf[addr_end - addr_start] = '\0';
@@ -422,16 +441,12 @@ pj_status_t pj_nat64_resolve_and_replace_hostname_with_ip_if_possible(char* prox
 {
     char hostname_buf[PJ_MAX_HOSTNAME];
     pj_bool_t proxy_is_static_ip_v6_address = strchr(proxy, ']') != NULL ? PJ_TRUE : PJ_FALSE;
-    char* addr_start = strchr(proxy, ':');
+    char* addr_start = find_addr_start(proxy);
     char* addr_end = NULL;
 
     if (addr_start != NULL) {
         addr_start++;
-        if (proxy_is_static_ip_v6_address) {
-            addr_end = strstr(proxy, "]:");
-        } else {
-            addr_end = strstr(addr_start, ":");
-        }
+        addr_end = find_addr_end(proxy_is_static_ip_v6_address, addr_start);
         if (addr_end != NULL) {
             size_t len_sip_sips = addr_start - proxy;
             size_t len_port_and_tail = strlen(proxy) - (addr_end -
