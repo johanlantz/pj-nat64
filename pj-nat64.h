@@ -18,12 +18,17 @@ typedef enum nat64_options {
  *                      NAT64_REWRITE_OUTGOING_SDP | NAT64_REWRITE_INCOMING_SDP | NAT64_REWRITE_ROUTE_AND_CONTACT activates all options.
  * @default             0 - No nat64 rewriting is done.
  */
-pj_status_t pj_nat64_enable_rewrite_module(nat64_options options);
+pj_status_t pj_nat64_enable_rewrite_module();
 
 /*
  * Disable rewriting module, for instance when on a ipv4 network
  */
 pj_status_t pj_nat64_disable_rewrite_module();
+
+/*
+ * Update rewriting options
+ */
+void pj_nat64_set_options(nat64_options options);
 
 /*
  * Helper function that takes an outbound proxy address, resolves and synthesizes the host or IP and writes it to
