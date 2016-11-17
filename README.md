@@ -22,7 +22,7 @@ The pj_nat64 in this repo is implemented as a pjsip module meaning no code patch
 #endif
 ```
 
-2. Once registration completes, you can check the transport type in the callback from pjsip and selectivly choose to activate nat64 rewriting and ipv6 media. Something like:
+2. Once registration completes, you can check the transport type in the on_reg_state callback from pjsip and selectivly choose to activate nat64 rewriting and ipv6 media. Something like:
 ```
 pjsip_transport* active_transport;
 if (active_transport->factory->type & PJSIP_TRANSPORT_IPV6) {
