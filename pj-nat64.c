@@ -364,9 +364,9 @@ static pjsip_module ipv6_module = {
     NULL,                           /* on_tsx_state()   */
 };
 
-pj_status_t pj_nat64_enable_rewrite_module(nat64_options options)
+pj_status_t pj_nat64_enable_rewrite_module()
 {
-    module_options = options;
+    module_options = 0;
     return pjsip_endpt_register_module(pjsua_get_pjsip_endpt(), &ipv6_module);
 }
 
@@ -398,6 +398,11 @@ char* find_addr_end(pj_bool_t proxy_is_static_ip_v6_address, char *addr_start)
             addr_end = strstr(addr_start, ";");
     }
     return addr_end;
+}
+
+void pj_nat64_set_options(nat64_options options)
+{
+    module_options = options;
 }
 
 static void replace_hostname_with_ip(char* proxy_hostname)
