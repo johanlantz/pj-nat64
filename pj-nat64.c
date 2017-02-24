@@ -8,12 +8,27 @@ static nat64_options module_options;
 
 static pjsua_acc_id active_add_id = PJSUA_INVALID_ID;
 
+//static to keep track of the hostname used in registration
+static char *resolved_host = NULL;
+
 /* Syntax error handler for parser. */
 static void on_syntax_error(pj_scanner *scanner)
 {
     PJ_UNUSED_ARG(scanner);
     PJ_LOG(4, (THIS_FILE, "Scanner syntax error at %s", scanner->curptr));
     PJ_THROW(PJ_EINVAL);
+}
+
+static void set_resolved_host(const char *host)
+{
+    //clear the old value
+    if (resolved_host != NULL)
+        free(resolved_host);
+    //dump everything but the brackets into a buffer
+    char hostBuf[PJ_MAX_HOSTNAME];
+    snprintf (hostBuf, strlen(host)-1, "%s", host+1);
+    //store it
+    resolved_host = strdup(hostBuf);
 }
 
 //Helper function to find a specific string using the scanner.
@@ -61,11 +76,22 @@ static int calculate_new_content_length(char* buffer)
 //Helper that will resolve or synthesize to ipv6. Output buffer will be null terminated
 static void resolve_or_synthesize_ipv4_to_ipv6(pj_str_t* host_or_ip, char* buf, int buf_len)
 {
+/* Since Android doesn't include the ability to synthesize IPv6 addresses from
+ * IPv4 addresses, we use the stored value from registration in resolved_host
+ * to do our SDP rewrites. */
+#if defined(ANDROID)
+    if (resolved_host != NULL) {
+        pj_ansi_snprintf(buf, buf_len, "%s", resolved_host);
+    } else {
+        PJ_LOG(1, (THIS_FILE, "Error: No host to put in SDP. Use original input"));
+        pj_ansi_snprintf(buf, buf_len, "%.*s", (int)host_or_ip->slen, host_or_ip->ptr);
+    }
+#else
     unsigned int count = 1;
     pj_addrinfo ai[1];
-    pj_getaddrinfo(PJ_AF_UNSPEC, host_or_ip, &count, ai);
+    pj_status_t stat = pj_getaddrinfo(PJ_AF_UNSPEC, host_or_ip, &count, ai);
 
-    if (count > 0) {
+    if (stat == PJ_SUCCESS && count > 0) {
         if (ai[0].ai_addr.addr.sa_family == PJ_AF_INET) {
             pj_inet_ntop(PJ_AF_INET, &ai[0].ai_addr.ipv4.sin_addr, buf, PJ_INET_ADDRSTRLEN);
         } else if (ai[0].ai_addr.addr.sa_family == PJ_AF_INET6) {
@@ -79,6 +105,7 @@ static void resolve_or_synthesize_ipv4_to_ipv6(pj_str_t* host_or_ip, char* buf, 
         PJ_LOG(1, (THIS_FILE, "Error: Synthesizing media ip failed, ai count = 0. Use original input"));
         pj_ansi_snprintf(buf, buf_len, "%.*s", (int)host_or_ip->slen, host_or_ip->ptr);
     }
+#endif
 }
 
 static int update_content_length(char* buffer, pjsip_msg* msg)
@@ -462,6 +489,7 @@ pj_status_t pj_nat64_resolve_and_replace_hostname_with_ip_if_possible(char* prox
             replace_hostname_with_ip(hostname_buf);
             pj_ansi_snprintf(resolved_proxy_buf, PJ_MAX_HOSTNAME, "%.*s%s%.*s",  (int)len_sip_sips,
                              proxy, hostname_buf, (int)len_port_and_tail, addr_end);
+            set_resolved_host(hostname_buf);
             return PJ_SUCCESS;
         }
     }
