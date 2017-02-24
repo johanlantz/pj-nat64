@@ -24,11 +24,12 @@ static void set_resolved_host(const char *host)
     //clear the old value
     if (resolved_host != NULL)
         free(resolved_host);
-    //dump everything but the brackets into a buffer
-    char hostBuf[PJ_MAX_HOSTNAME];
-    snprintf (hostBuf, strlen(host)-1, "%s", host+1);
-    //store it
-    resolved_host = strdup(hostBuf);
+    //dump everything but the brackets into a buffer and store it
+    if (host[0] == '[')
+        resolved_host = strndup(host+1, strlen(host)-2);
+    //if it's somehow IPv4, just copy it
+    else
+        resolved_host = strdup(host);
 }
 
 //Helper function to find a specific string using the scanner.
