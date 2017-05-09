@@ -244,68 +244,81 @@ static void replace_sdp_ipv4_with_ipv6(pjsip_rx_data *rdata)
     PJ_USE_EXCEPTION;
     pj_scanner scanner;
     pj_str_t result = {NULL, 0};
-    char* org_buffer = rdata->msg_info.msg_buf;
-    char new_buffer[PJSIP_MAX_PKT_LEN];
+    char* org_buffer = (char *)pj_pool_calloc(rdata->tp_info.pool, PJSIP_MAX_PKT_LEN+1, 1);
+    //scanner wants to NULL terminate, so we have to make a copy
+    pj_memcpy(org_buffer, rdata->msg_info.msg_buf, rdata->msg_info.len);
+    //we need a bigger buffer since we're changing IPv4 -> IPv6
+    char* new_buffer = (char *)pj_pool_calloc(rdata->tp_info.pool, PJSIP_MAX_PKT_LEN+1, 1);
     char* walker_p = new_buffer;
     pj_str_t ipv6_str = pj_str("IP6");
-
-    pj_bzero(new_buffer, PJSIP_MAX_PKT_LEN);
+    pj_str_t ipv4_str = pj_str("IP4");
 
     PJ_LOG(4, (THIS_FILE, "**********Incoming INVITE or 200 with IPv4 address*************"));
     PJ_LOG(4, (THIS_FILE, "%s", org_buffer));
     PJ_LOG(4, (THIS_FILE, "***************************************************************"));
 
-    pj_scan_init(&scanner, org_buffer, strlen(org_buffer), 0, &on_syntax_error);
+    pj_scan_init(&scanner, org_buffer, rdata->msg_info.len, 0, &on_syntax_error);
 
     PJ_TRY {
         do {
             //Find instance of IP4
             scanner_find_string(&scanner, "IP4", &result);
             pj_memcpy(walker_p, (result.ptr - result.slen), result.slen);
-            walker_p = walker_p + result.slen;
+            walker_p += result.slen;
 
             //Replace with IP6
             pj_memcpy(walker_p, ipv6_str.ptr, ipv6_str.slen);
-            walker_p = walker_p + ipv6_str.slen;
-            pj_scan_get_n(&scanner, (int)ipv6_str.slen, &result);
+            walker_p += ipv6_str.slen;
+            pj_scan_get_n(&scanner, (int)ipv4_str.slen, &result);
 
             //Find start of IP address and copy (hopefully only 1 whitespace)
             pj_scan_get_until_chr(&scanner, "0123456789", &result);
             pj_memcpy(walker_p, result.ptr, result.slen);
-            walker_p = walker_p + result.slen;
+            walker_p += result.slen;
 
             //Extract IP address
             pj_scan_get_until_ch( &scanner, '\r', &result);
             PJ_LOG(4, (THIS_FILE, "Extracted ip4 address as %.*s", result.slen, result.ptr));
 
-            resolve_or_synthesize_ipv4_to_ipv6(&result, walker_p, (PJSIP_MAX_PKT_LEN - (int)strlen(walker_p)));
+            resolve_or_synthesize_ipv4_to_ipv6(&result, walker_p, (PJSIP_MAX_PKT_LEN - (int)strlen(new_buffer)));
 
             //walker_p is now null terminated, reset it to point at the end of the current buffer (without null termination)
-            walker_p = walker_p + strlen(walker_p);
+            walker_p += strlen(walker_p);
 
             //In case this is the last occurance in the message, lets append the rest but do not advance walker_p in case there is more
-            //The scanner string is always null terminated so include the terminating character as well
-            pj_memcpy(walker_p, scanner.curptr, (scanner.end - scanner.curptr) +1);
+            //The buffer is NULL'd by calloc, so no need to NULL terminate after the memcpy
+            pj_memcpy(walker_p, scanner.curptr, (scanner.end - scanner.curptr));
         } while (!pj_scan_is_eof(&scanner));
 
 
     } PJ_CATCH_ANY {
         if (strlen(new_buffer) > 0)
         {
-            pj_memcpy(org_buffer, new_buffer, strlen(new_buffer));
-            org_buffer[strlen(new_buffer)] = '\0';
-            update_content_length(org_buffer, rdata->msg_info.msg);
+            update_content_length(new_buffer, rdata->msg_info.msg);
+            //update the body
+            char* body_delim = "\r\n\r\n"; //Sip message body starts with a newline and final empty line after sdp does not count
+            char* body_start = strstr(new_buffer, body_delim);
+            if (body_start != NULL) {
+                body_start = body_start + strlen(body_delim);
+                rdata->msg_info.msg->body->data = (void*)body_start;
+            }
             PJ_LOG(4, (THIS_FILE,
             "We have successfully parsed the INVITE/200 OK until EOF. Replace rx buffer. pjsip will now print the modified rx packet."));
             //Update all internal packet sizes (body->len has already been updated by update_content_length)
+            //set the data
+            //
+            //This is an ugly hack to the packet, but it seems to fix the rewritten data
+            //and SDP parsing. We're going to go with it for now and fix it later if we
+            //find another edge case. - KK 5/9/17
+            pj_memcpy(rdata->pkt_info.packet, new_buffer, strlen(new_buffer));
+            rdata->msg_info.msg_buf = new_buffer;
+            //set the lengths
             rdata->pkt_info.len = strlen(rdata->pkt_info.packet);
             rdata->msg_info.len = (int)rdata->pkt_info.len;
             rdata->tp_info.transport->last_recv_len = rdata->pkt_info.len;
         } else {
             PJ_LOG(1, (THIS_FILE, "Error: Parsing of the incoming INVITE/200 OK failed at %s. Leave incoming buffer as is", scanner.curptr));
         }
-        pj_scan_fini(&scanner);
-        return;
     }
     PJ_END;
     pj_scan_fini(&scanner);
