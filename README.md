@@ -12,7 +12,7 @@ http://trac.pjsip.org/repos/ticket/1917#comment:1
 
 For the SIP transport functionality pjsip version 2.5.5 has pretty good support for most things but as of August 2016, the media rewriting is not managed so you might have to implement something like this module.
 
-##Activation
+## Activation
 The pj_nat64 in this repo is implemented as a pjsip module meaning no code patching is necessary. There are many ways you can activate it and in the end it comes down to how your project is setup, weather you use bindings to another language or pjsua2 as well as how you manage connectivity changes. The example below is what I use and it is based on a C layer on top of pjsua, you might have to adapt to your specific situation.
 
 1. Register the module when starting up pjsip, normally after pjsua_start has returned with PJ_SUCCESS.
