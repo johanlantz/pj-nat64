@@ -134,7 +134,7 @@ static int update_content_length(char* buffer)
         return -1;
     }
 
-    //Step 2: Rewrite the buffer so the Content-Length header is correct
+    //Rewrite the buffer so the Content-Length header is correct
     pj_scan_init(&scanner, buffer, strlen(buffer), 0, &on_syntax_error);
 
     pj_ansi_snprintf(new_content_len_buf, CONTENT_LEN_BUF_SIZE, "%d", new_content_len);
